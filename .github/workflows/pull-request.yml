@@ -1,0 +1,65 @@
+name: PR - Check-only delta deploy to UAT
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  Code-Analysis:
+    runs-on:  ubuntu-latest
+    steps:
+      # Checkout the code in the pull request
+      - name: 'Checkout source code'
+        uses: actions/checkout@v3
+      # Install PMD
+      - name: Install PMD
+        run: wget https://github.com/pmd/pmd/releases/download/pmd_releases%2F6.51.0/pmd-bin-6.51.0.zip && unzip pmd-bin-6.51.0.zip
+      # Execute PMD
+      - name: Execute PMD
+        run: pmd-bin-6.51.0/bin/run.sh pmd --minimum-priority 2 -R apex-rules.xml -d force-app -f text -l apex
+
+  Check-Only-Deploy:
+    runs-on:  ubuntu-latest
+    steps:
+      # Install Salesforce CLI
+      - name: Install Salesforce CLI
+        run: |
+          npm install sfdx-cli --global
+          sfdx --version
+      # SFDX-Git-Delta
+      - name: Install plugins
+        run: |
+          echo y | sfdx plugins:install sfdx-git-delta
+          sfdx plugins
+      # Install utilities
+      - name: Install utilities
+        run: |
+         pip install yq
+         xq --version
+      # Checkout the code in the pull request
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      # Authenticate to target org
+      - name: "Authenticate to Org"
+        run: |
+          echo ${{ secrets.SFDXAUTHURL_UAT }} > ./SFDX_URL.txt
+          sfdx force:auth:sfdxurl:store -f ./SFDX_URL.txt --setdefaultusername
+      # Check-only deploy
+      - name: "Check-only delta deploy"
+        run: |
+          sfdx sgd:source:delta --to "HEAD" --from "origin/main" --output "." -i .forceignore
+          echo "--- package.xml generated with added and modified metadata ---"
+          cat package/package.xml
+          echo
+          echo "--- Apex Tests to be executed ---"
+          export APEX_CLASSES=$(xq . < package/package.xml | jq '.Package.types | [.] | flatten | map(select(.name=="ApexClass")) | .[] | .members | [.] | flatten | map(select(. | index("*") | not)) | unique | join(",")' -r)
+          echo $APEX_CLASSES
+          echo
+          echo "--- Delta Check-Only Deploy ---"
+          if [ -z "$APEX_CLASSES" ]; then
+            sfdx force:source:deploy -x package/package.xml -w 30 --checkonly
+          else
+            sfdx force:source:deploy -x package/package.xml -w 30 -l RunSpecifiedTests -r "$APEX_CLASSES" --checkonly
+          fi

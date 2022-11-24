@@ -1,0 +1,77 @@
+name: Manual Deploy to UAT or Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      target-org:
+        description: 'Target Org'
+        required: true
+        default: 'UAT'
+        type: choice
+        options:
+        - UAT
+        - Production
+      deploy-type:
+        description: 'Deployment Type'
+        required: true
+        default: 'Delta'
+        type: choice
+        options:
+        - Delta
+        - Full
+
+jobs:
+  Deploy:
+    runs-on:  ubuntu-latest
+    steps:
+      # Install Salesforce CLI
+      - name: Install Salesforce CLI
+        run: |
+          npm install sfdx-cli --global
+          sfdx --version
+      # SFDX-Git-Delta
+      - name: Install plugins
+        run: |
+          echo y | sfdx plugins:install sfdx-git-delta
+          sfdx plugins
+      # Install utilities
+      - name: Install utilities
+        run: |
+         pip install yq
+         xq --version
+      # Checkout the code in the pull request
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      # Authenticate to target org
+      - name: "Authenticate to Org"
+        run: |
+          if [ ${{ inputs.target-org }} == "UAT" ]; then
+            echo ${{ secrets.SFDXAUTHURL_UAT }} > ./SFDX_URL.txt
+          elif [ ${{ inputs.target-org }} == "Production" ]; then
+            echo ${{ secrets.SFDXAUTHURL_PROD }} > ./SFDX_URL.txt
+          fi
+          sfdx force:auth:sfdxurl:store -f ./SFDX_URL.txt --setdefaultusername
+      # Deploy
+      - name: "Deploy"
+        run: |
+          if [ ${{ inputs.deploy-type }} == "Full" ]; then
+            echo "--- Full Deploy ---"
+            sfdx force:source:deploy -p force-app -w 30 -l RunLocalTests
+          elif [ ${{ inputs.deploy-type }} == "Delta" ]; then
+            sfdx sgd:source:delta --to "HEAD" --from "HEAD~1" --output "." -i .forceignore
+            echo "--- package.xml generated with added and modified metadata ---"
+            cat package/package.xml
+            echo
+            echo "--- Apex Tests to be executed ---"
+            export APEX_CLASSES=$(xq . < package/package.xml | jq '.Package.types | [.] | flatten | map(select(.name=="ApexClass")) | .[] | .members | [.] | flatten | map(select(. | index("*") | not)) | unique | join(",")' -r)
+            echo $APEX_CLASSES
+            echo
+            echo "--- Delta Deploy ---"
+            if [ -z "$APEX_CLASSES" ]; then
+              sfdx force:source:deploy -x package/package.xml -w 30
+            else
+              sfdx force:source:deploy -x package/package.xml -w 30 -l RunSpecifiedTests -r "$APEX_CLASSES"
+            fi
+          fi

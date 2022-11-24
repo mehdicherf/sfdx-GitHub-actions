@@ -1,0 +1,53 @@
+name: Delta deploy to UAT
+
+on:
+  push:
+    branches:    
+      - main
+
+jobs:
+  Delta-Deploy-UAT:
+    runs-on:  ubuntu-latest
+    steps:
+      # Install Salesforce CLI
+      - name: Install Salesforce CLI
+        run: |
+          npm install sfdx-cli --global
+          sfdx --version
+      # SFDX-Git-Delta
+      - name: Install plugins
+        run: |
+          echo y | sfdx plugins:install sfdx-git-delta
+          sfdx plugins
+      # Install utilities
+      - name: Install utilities
+        run: |
+         pip install yq
+         xq --version
+      # Checkout the code in the pull request
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      # Authenticate to target org
+      - name: "Authenticate to Org"
+        run: |
+          echo ${{ secrets.SFDXAUTHURL_UAT }} > ./SFDX_URL.txt
+          sfdx force:auth:sfdxurl:store -f ./SFDX_URL.txt --setdefaultusername
+      # Delta deploy
+      - name: "Delta deploy"
+        run: |
+          sfdx sgd:source:delta --to "HEAD" --from "HEAD~1" --output "." -i .forceignore
+          echo "--- package.xml generated with added and modified metadata ---"
+          cat package/package.xml
+          echo
+          echo "--- Apex Tests to be executed ---"
+          export APEX_CLASSES=$(xq . < package/package.xml | jq '.Package.types | [.] | flatten | map(select(.name=="ApexClass")) | .[] | .members | [.] | flatten | map(select(. | index("*") | not)) | unique | join(",")' -r)
+          echo $APEX_CLASSES
+          echo
+          echo "--- Delta Deploy ---"
+          if [ -z "$APEX_CLASSES" ]; then
+            sfdx force:source:deploy -x package/package.xml -w 30
+          else
+            sfdx force:source:deploy -x package/package.xml -w 30 -l RunSpecifiedTests -r "$APEX_CLASSES"
+          fi
